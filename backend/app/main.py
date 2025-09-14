@@ -15,13 +15,39 @@ from enhanced_utils import (
     calculate_confidence_score
 )
 from stripe_webhook import stripe_webhook_router
+from curation_api import curation_router
+from database import create_tables, seed_initial_data, SessionLocal
 import logging
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Street Time Machine - Enhanced Backend")
+app = FastAPI(title="Street Time Machine - AI-Enhanced Backend")
+
+# Initialize database on startup
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database and seed data on startup"""
+    try:
+        create_tables()
+        logger.info("Database tables created/verified")
+        
+        # Seed initial data if database is empty
+        db = SessionLocal()
+        try:
+            from database import HistoricalPhoto
+            count = db.query(HistoricalPhoto).count()
+            if count == 0:
+                seed_initial_data(db)
+                logger.info("Database seeded with initial Chicago photos")
+            else:
+                logger.info(f"Database already contains {count} photos")
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Startup error: {e}")
 
 # CORS - allow your frontend origin
 app.add_middleware(
@@ -32,8 +58,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount stripe webhook router
+# Include routers
 app.include_router(stripe_webhook_router, prefix="/stripe")
+app.include_router(curation_router)  # AI curation endpoints
 
 @app.post("/process-photo")
 async def process_photo(file: UploadFile = File(...), metadata: str = Form(...)):
@@ -86,7 +113,8 @@ async def process_photo(file: UploadFile = File(...), metadata: str = Form(...))
             "match_details": {
                 "method": match_result.get("match_method", "gps_proximity"),
                 "landmarks_matched": match_result.get("landmarks_matched", []),
-                "viewing_angle_match": match_result.get("angle_similarity", 0)
+                "viewing_angle_match": match_result.get("angle_similarity", 0),
+                "used_fallback_location": enhanced_metadata.get("fallback_location", False)
             }
         }
         
