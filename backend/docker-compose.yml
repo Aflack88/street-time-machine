@@ -1,0 +1,93 @@
+# docker-compose.yml - Production ready setup
+version: '3.8'
+
+services:
+  # Backend API
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://streettime:${DB_PASSWORD}@db:5432/streettimemachine
+      - FRONTEND_ORIGIN=https://yourdomain.com
+      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - ./backend/app/static_historical:/app/static_historical
+      - ./uploads:/app/uploads
+    restart: unless-stopped
+
+  # Frontend (Next.js)
+  frontend:
+    build: 
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_BACKEND_ORIGIN=https://api.yourdomain.com
+      - NEXT_PUBLIC_STRIPE_PRICE_MONTHLY=${STRIPE_PRICE_MONTHLY}
+      - NEXT_PUBLIC_STRIPE_PRICE_YEARLY=${STRIPE_PRICE_YEARLY}
+    restart: unless-stopped
+
+  # PostgreSQL with PostGIS for spatial queries
+  db:
+    image: postgis/postgis:15-3.3
+    environment:
+      - POSTGRES_DB=streettimemachine
+      - POSTGRES_USER=streettime
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+
+  # Redis for caching and session storage
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  # Nginx reverse proxy
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
+      - ./ssl:/etc/nginx/ssl
+      - ./static:/var/www/static
+    depends_on:
+      - frontend
+      - backend
+    restart: unless-stopped
+
+  # Background task worker (for heavy AI processing)
+  worker:
+    build: ./backend
+    command: celery -A main.celery worker --loglevel=info
+    environment:
+      - DATABASE_URL=postgresql://streettime:${DB_PASSWORD}@db:5432/streettimemachine
+      - REDIS_URL=redis://redis:6379
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - ./backend/app/static_historical:/app/static_historical
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
