@@ -9,11 +9,15 @@ from PIL.ExifTags import TAGS, GPSTAGS
 import piexif
 import logging
 
+# Import our comprehensive data
+from chicago_data import CHICAGO_HISTORICAL_PHOTOS, get_historical_story
+from ai_vision import enhance_location_detection
+
 logger = logging.getLogger(__name__)
 
 def extract_enhanced_metadata(image: Image.Image, image_bytes: bytes, gps_data: Dict, heading: Optional[float]) -> Dict[str, Any]:
     """
-    Extract comprehensive metadata from image and user data
+    Extract comprehensive metadata using AI vision analysis
     """
     metadata = {
         "gps": gps_data,
@@ -36,14 +40,31 @@ def extract_enhanced_metadata(image: Image.Image, image_bytes: bytes, gps_data: 
     except Exception as e:
         logger.warning(f"Could not extract EXIF GPS: {e}")
     
+    # Enhanced location detection using AI
+    try:
+        enhanced_location = enhance_location_detection(
+            image, 
+            metadata["exif_gps"], 
+            gps_data
+        )
+        metadata["enhanced_location"] = enhanced_location
+        
+        # Use the best available location
+        if enhanced_location["final_location"]:
+            metadata["best_location"] = enhanced_location["final_location"]
+        else:
+            metadata["best_location"] = gps_data
+            
+    except Exception as e:
+        logger.error(f"Enhanced location detection failed: {e}")
+        metadata["best_location"] = gps_data
+    
     return metadata
 
 def extract_visual_features(image: Image.Image) -> Dict[str, Any]:
     """
-    Extract basic visual features that can help with matching
-    In production, use computer vision APIs or custom models
+    Extract basic visual features for matching
     """
-    # Convert to RGB if needed
     if image.mode != 'RGB':
         image = image.convert('RGB')
     
@@ -51,7 +72,6 @@ def extract_visual_features(image: Image.Image) -> Dict[str, Any]:
     colors = image.getcolors(maxcolors=256*256*256)
     dominant_colors = sorted(colors, key=lambda x: x[0], reverse=True)[:5] if colors else []
     
-    # Image characteristics
     features = {
         "dominant_colors": [(count, color) for count, color in dominant_colors[:3]],
         "brightness": calculate_brightness(image),
@@ -59,12 +79,6 @@ def extract_visual_features(image: Image.Image) -> Dict[str, Any]:
         "aspect_ratio": image.size[0] / image.size[1],
         "resolution": image.size[0] * image.size[1]
     }
-    
-    # TODO: Add actual landmark detection using:
-    # - OpenAI Vision API
-    # - Google Vision API  
-    # - Custom trained model
-    features["detected_landmarks"] = mock_landmark_detection(image)
     
     return features
 
@@ -84,29 +98,6 @@ def calculate_contrast(image: Image.Image) -> float:
     mean = sum(i * histogram[i] for i in range(256)) / pixels
     variance = sum(((i - mean) ** 2) * histogram[i] for i in range(256)) / pixels
     return math.sqrt(variance) / 255.0
-
-def mock_landmark_detection(image: Image.Image) -> List[str]:
-    """
-    Mock landmark detection - replace with real AI service
-    """
-    # In production, integrate with:
-    # - OpenAI GPT-4 Vision
-    # - Google Cloud Vision API
-    # - AWS Rekognition
-    # - Custom trained model
-    
-    chicago_landmarks = [
-        "Chicago Theater", "Willis Tower", "Cloud Gate", "Navy Pier",
-        "Wrigley Building", "Tribune Tower", "Art Institute",
-        "Grant Park", "Millennium Park", "State Street"
-    ]
-    
-    # Mock detection based on image characteristics
-    detected = []
-    if image.size[0] > 1000:  # High res might catch more detail
-        detected.extend(random.sample(chicago_landmarks, min(2, len(chicago_landmarks))))
-    
-    return detected
 
 def parse_gps_from_exif(gps_ifd: Dict) -> Optional[Dict[str, float]]:
     """Parse GPS coordinates from EXIF data"""
@@ -137,132 +128,108 @@ def parse_gps_from_exif(gps_ifd: Dict) -> Optional[Dict[str, float]]:
 
 def find_best_historical_match(metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
-    Find the best historical photo match using multiple strategies
+    Find the best historical photo match using our comprehensive database
     """
-    gps = metadata["gps"]
+    # Use the best available location
+    location = metadata.get("best_location") or metadata.get("gps")
+    if not location:
+        logger.warning("No location data available for matching")
+        return None
+        
+    lat = location["latitude"]
+    lon = location["longitude"]
     heading = metadata.get("heading")
-    visual_features = metadata.get("visual_features", {})
     
-    # Load historical database (in production, use real database)
-    historical_db = load_historical_database()
+    logger.info(f"Searching for matches near {lat}, {lon}")
+    
+    # Load our comprehensive historical database
+    historical_db = CHICAGO_HISTORICAL_PHOTOS
     
     # Strategy 1: Geographic proximity
-    candidates = filter_by_proximity(historical_db, gps["latitude"], gps["longitude"], radius_km=0.5)
+    candidates = filter_by_proximity(historical_db, lat, lon, radius_km=1.0)  # Increased radius
     
     if not candidates:
+        logger.warning(f"No candidates found within 1km of {lat}, {lon}")
         return None
+    
+    logger.info(f"Found {len(candidates)} candidates within 1km")
     
     # Strategy 2: Filter by viewing angle/heading
     if heading is not None:
-        candidates = filter_by_heading(candidates, heading, tolerance_degrees=45)
+        heading_filtered = filter_by_heading(candidates, heading, tolerance_degrees=60)
+        if heading_filtered:
+            candidates = heading_filtered
+            logger.info(f"Filtered to {len(candidates)} candidates by heading")
     
-    # Strategy 3: Visual similarity scoring
+    # Strategy 3: Enhanced scoring with AI analysis
     scored_candidates = []
+    ai_analysis = metadata.get("enhanced_location", {}).get("ai_analysis", {})
+    
     for candidate in candidates:
-        score = calculate_visual_similarity(visual_features, candidate.get("visual_features", {}))
-        distance = calculate_distance(gps["latitude"], gps["longitude"], 
-                                    candidate["gps"]["latitude"], candidate["gps"]["longitude"])
+        # Distance scoring
+        distance = calculate_distance(lat, lon, candidate["latitude"], candidate["longitude"])
+        distance_score = max(0, 1 - (distance / 2.0))  # Normalize to 0-1
         
-        # Combined score: visual similarity + proximity + era interest
+        # AI landmark matching
+        ai_landmarks = ai_analysis.get("landmarks", [])
+        candidate_landmarks = candidate.get("landmarks", [])
+        landmark_matches = len(set(ai_landmarks) & set(candidate_landmarks))
+        landmark_score = min(landmark_matches * 0.3, 1.0)
+        
+        # Historical interest score
+        interest_score = candidate.get("historical_interest_score", 0.5)
+        
+        # Combine scores
         combined_score = (
-            score * 0.4 +  # Visual similarity
-            (1 - min(distance, 1)) * 0.3 +  # Proximity (closer = better)
-            candidate.get("interest_score", 0.5) * 0.3  # Historical interest
+            distance_score * 0.4 +  # Distance is important
+            landmark_score * 0.3 +  # AI landmark matching
+            interest_score * 0.3    # Historical significance
         )
         
-        candidate["match_score"] = combined_score
-        candidate["distance_meters"] = distance * 1000
-        scored_candidates.append(candidate)
+        candidate_copy = candidate.copy()
+        candidate_copy["match_score"] = combined_score
+        candidate_copy["distance_meters"] = distance * 1000
+        candidate_copy["landmark_matches"] = landmark_matches
+        
+        scored_candidates.append(candidate_copy)
     
     # Return best match
     if scored_candidates:
         best_match = max(scored_candidates, key=lambda x: x["match_score"])
-        best_match["match_method"] = "multi_strategy"
+        best_match["match_method"] = "comprehensive_ai_analysis"
+        
+        logger.info(f"Best match: {best_match['title']} ({best_match['year']}) with score {best_match['match_score']:.2f}")
         return best_match
     
     return None
 
-def load_historical_database() -> List[Dict[str, Any]]:
-    """
-    Load historical photo database
-    In production: PostgreSQL + PostGIS with proper indexing
-    """
-    # Mock database with Chicago locations
-    return [
-        {
-            "url": "/historical/state_street_1950.jpg",
-            "year": 1950,
-            "gps": {"latitude": 41.8781, "longitude": -87.6278},
-            "heading_range": [0, 90],  # North to East
-            "landmarks": ["State Street", "Chicago Theater"],
-            "interest_score": 0.9,
-            "visual_features": {
-                "dominant_colors": [(1000, (120, 100, 80))],
-                "brightness": 0.6,
-                "has_people": True,
-                "has_cars": True,
-                "architecture_style": "mid_century"
-            }
-        },
-        {
-            "url": "/historical/loop_1920.jpg", 
-            "year": 1920,
-            "gps": {"latitude": 41.8796, "longitude": -87.6237},
-            "heading_range": [90, 180],  # East to South
-            "landmarks": ["Loop District", "El Train"],
-            "interest_score": 0.8,
-            "visual_features": {
-                "dominant_colors": [(800, (100, 90, 70))],
-                "brightness": 0.4,
-                "has_people": True,
-                "has_cars": False,
-                "architecture_style": "early_1900s"
-            }
-        },
-        {
-            "url": "/historical/michigan_ave_1960.jpg",
-            "year": 1960, 
-            "gps": {"latitude": 41.8819, "longitude": -87.6278},
-            "heading_range": [270, 360],  # West to North
-            "landmarks": ["Michigan Avenue", "Art Institute"],
-            "interest_score": 0.85,
-            "visual_features": {
-                "dominant_colors": [(1200, (140, 120, 100))],
-                "brightness": 0.7,
-                "has_people": True,
-                "has_cars": True,
-                "architecture_style": "mid_century_modern"
-            }
-        }
-    ]
-
-def filter_by_proximity(database: List[Dict], lat: float, lon: float, radius_km: float = 0.5) -> List[Dict]:
+def filter_by_proximity(database: List[Dict], lat: float, lon: float, radius_km: float = 1.0) -> List[Dict]:
     """Filter historical photos by geographic proximity"""
     candidates = []
     for item in database:
-        distance = calculate_distance(lat, lon, item["gps"]["latitude"], item["gps"]["longitude"])
+        distance = calculate_distance(lat, lon, item["latitude"], item["longitude"])
         if distance <= radius_km:
             candidates.append(item)
     return candidates
 
-def filter_by_heading(candidates: List[Dict], user_heading: float, tolerance_degrees: int = 45) -> List[Dict]:
+def filter_by_heading(candidates: List[Dict], user_heading: float, tolerance_degrees: int = 60) -> List[Dict]:
     """Filter by viewing direction/heading"""
     if user_heading is None:
         return candidates
     
     filtered = []
     for candidate in candidates:
-        heading_range = candidate.get("heading_range", [0, 360])
+        start = candidate.get("viewing_direction_start", 0)
+        end = candidate.get("viewing_direction_end", 360)
         
         # Check if user heading falls within the photo's viewing range
-        start, end = heading_range
         if start <= end:
             in_range = start <= user_heading <= end
         else:  # Range crosses 0 degrees (e.g., 350-30)
             in_range = user_heading >= start or user_heading <= end
             
         # Also check with tolerance
-        if in_range or any(abs(user_heading - h) <= tolerance_degrees for h in heading_range):
+        if in_range or any(abs(user_heading - h) <= tolerance_degrees for h in [start, end]):
             filtered.append(candidate)
     
     return filtered
@@ -281,130 +248,61 @@ def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> fl
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c
 
-def calculate_visual_similarity(features1: Dict, features2: Dict) -> float:
-    """Calculate visual similarity score between two images"""
-    if not features1 or not features2:
-        return 0.5  # Default similarity
-    
-    similarity_score = 0.5  # Base score
-    
-    # Compare brightness
-    if "brightness" in features1 and "brightness" in features2:
-        brightness_diff = abs(features1["brightness"] - features2["brightness"])
-        similarity_score += (1 - brightness_diff) * 0.2
-    
-    # Compare dominant colors (simplified)
-    if "dominant_colors" in features1 and "dominant_colors" in features2:
-        # This is very simplified - in production use proper color space comparison
-        similarity_score += 0.2  # Mock color similarity
-    
-    # Architectural era matching
-    arch1 = features1.get("architecture_style", "")
-    arch2 = features2.get("architecture_style", "")
-    if arch1 == arch2 and arch1:
-        similarity_score += 0.3
-    
-    return min(similarity_score, 1.0)
-
 def calculate_confidence_score(metadata: Dict, match: Dict) -> int:
     """Calculate confidence percentage for the match"""
-    base_confidence = 60
+    base_confidence = 50
     
-    # GPS accuracy bonus
-    gps_accuracy = metadata["gps"].get("accuracy", 100)
-    if gps_accuracy < 10:
-        base_confidence += 20
-    elif gps_accuracy < 50:
+    # Enhanced location analysis confidence
+    enhanced_location = metadata.get("enhanced_location", {})
+    location_confidence = enhanced_location.get("confidence_score", 0.3)
+    base_confidence += int(location_confidence * 30)
+    
+    # AI analysis boosts
+    ai_analysis = enhanced_location.get("ai_analysis", {})
+    if ai_analysis.get("chicago_likelihood", 0) > 0.7:
+        base_confidence += 15
+    
+    if ai_analysis.get("landmarks"):
         base_confidence += 10
     
-    # Distance penalty
+    # Distance penalty/bonus
     distance_km = match.get("distance_meters", 0) / 1000
-    if distance_km < 0.1:
-        base_confidence += 15
-    elif distance_km < 0.3:
-        base_confidence += 5
-    else:
-        base_confidence -= 10
+    if distance_km < 0.2:
+        base_confidence += 20
+    elif distance_km < 0.5:
+        base_confidence += 10
+    elif distance_km > 1.5:
+        base_confidence -= 15
+    
+    # Landmark matches bonus
+    if match.get("landmark_matches", 0) > 0:
+        base_confidence += match["landmark_matches"] * 5
     
     # Heading match bonus
     if metadata.get("heading") is not None:
-        base_confidence += 10
+        base_confidence += 8
     
-    # Visual features bonus
-    if metadata.get("visual_features", {}).get("detected_landmarks"):
-        base_confidence += 15
+    # Match score bonus
+    match_score = match.get("match_score", 0.5)
+    base_confidence += int(match_score * 20)
     
-    return min(max(base_confidence, 30), 95)
+    return min(max(base_confidence, 20), 95)
 
 def generate_historical_story(match: Dict, metadata: Dict) -> Dict[str, str]:
-    """Generate contextual story and facts for the historical match"""
+    """Generate contextual story using our comprehensive database"""
     year = match.get("year", 1950)
     landmarks = match.get("landmarks", [])
     
-    # In production, use AI to generate contextual stories
-    # For now, use curated content based on location/era
+    # Use our comprehensive story database
+    story = get_historical_story(year, landmarks)
     
-    stories_db = {
-        1920: {
-            "quotes": [
-                "The roar of the El train mixed with the clip-clop of horse-drawn carriages on State Street.",
-                "Flappers and businessmen shared the sidewalks in the heart of America's Second City.",
-                "The Chicago Loop buzzed with the energy of prohibition-era commerce."
-            ],
-            "facts": [
-                "Chicago's elevated train system was already 30 years old by this time.",
-                "The city was rebuilding rapidly after the Great Chicago Fire of 1871.",
-                "State Street was known as 'That Great Street' and the shopping heart of the Midwest."
-            ]
-        },
-        1950: {
-            "quotes": [
-                "Post-war optimism filled the air as Chicago modernized at breakneck speed.",
-                "The sound of construction mixed with jazz spilling from nightclub doorways.",
-                "Families flocked downtown to see the latest movies at the grand theaters."
-            ],
-            "facts": [
-                "Chicago's population peaked at 3.6 million residents in 1950.",
-                "The Chicago Housing Authority was constructing massive public housing projects.",
-                "State Street featured some of the world's largest department stores like Marshall Field's."
-            ]
-        },
-        1960: {
-            "quotes": [
-                "The winds of change swept through Chicago as the civil rights movement gained momentum.",
-                "Modern architecture began transforming the city's iconic skyline.",
-                "Rock and roll echoed from record shops along Michigan Avenue."
-            ],
-            "facts": [
-                "The second wave of the Great Migration brought many African Americans to Chicago.",
-                "Urban renewal projects were dramatically reshaping neighborhoods.",
-                "Chicago became a major hub for blues and emerging rock music."
-            ]
-        }
-    }
+    # Add specific context from the match
+    if match.get("story_context"):
+        story["context"] = match["story_context"]
     
-    # Find closest year in our stories database
-    available_years = list(stories_db.keys())
-    closest_year = min(available_years, key=lambda x: abs(x - year))
-    story_data = stories_db[closest_year]
+    # Add AI analysis insights
+    ai_analysis = metadata.get("enhanced_location", {}).get("ai_analysis", {})
+    if ai_analysis.get("ai_raw_analysis"):
+        story["ai_insights"] = f"AI Analysis: {ai_analysis['ai_raw_analysis'][:200]}..."
     
-    # Select random quote and fact
-    quote = random.choice(story_data["quotes"])
-    fact = random.choice(story_data["facts"])
-    
-    # Add landmark-specific context if available
-    if landmarks:
-        landmark = landmarks[0]  # Use first landmark
-        if "State Street" in landmark:
-            fact = f"This area along {landmark} was the commercial heart of Chicago, earning the nickname 'That Great Street'."
-        elif "Loop" in landmark:
-            fact = f"The {landmark} got its name from the elevated train tracks that 'loop' around downtown Chicago."
-        elif "Michigan Avenue" in landmark:
-            fact = f"{landmark} was becoming known as the 'Magnificent Mile' for its upscale shopping and architecture."
-    
-    return {
-        "quote": quote,
-        "fact": fact,
-        "source": "Chicago Historical Society Archives",
-        "year_context": f"circa {year}"
-    }
+    return story
