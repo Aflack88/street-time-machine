@@ -361,4 +361,50 @@ def generate_historical_story(match: Dict, metadata: Dict) -> Dict[str, str]:
             "quotes": [
                 "Post-war optimism filled the air as Chicago modernized at breakneck speed.",
                 "The sound of construction mixed with jazz spilling from nightclub doorways.",
-                "Families flocked downtown
+                "Families flocked downtown to see the latest movies at the grand theaters."
+            ],
+            "facts": [
+                "Chicago's population peaked at 3.6 million residents in 1950.",
+                "The Chicago Housing Authority was constructing massive public housing projects.",
+                "State Street featured some of the world's largest department stores like Marshall Field's."
+            ]
+        },
+        1960: {
+            "quotes": [
+                "The winds of change swept through Chicago as the civil rights movement gained momentum.",
+                "Modern architecture began transforming the city's iconic skyline.",
+                "Rock and roll echoed from record shops along Michigan Avenue."
+            ],
+            "facts": [
+                "The second wave of the Great Migration brought many African Americans to Chicago.",
+                "Urban renewal projects were dramatically reshaping neighborhoods.",
+                "Chicago became a major hub for blues and emerging rock music."
+            ]
+        }
+    }
+    
+    # Find closest year in our stories database
+    available_years = list(stories_db.keys())
+    closest_year = min(available_years, key=lambda x: abs(x - year))
+    story_data = stories_db[closest_year]
+    
+    # Select random quote and fact
+    quote = random.choice(story_data["quotes"])
+    fact = random.choice(story_data["facts"])
+    
+    # Add landmark-specific context if available
+    if landmarks:
+        landmark = landmarks[0]  # Use first landmark
+        if "State Street" in landmark:
+            fact = f"This area along {landmark} was the commercial heart of Chicago, earning the nickname 'That Great Street'."
+        elif "Loop" in landmark:
+            fact = f"The {landmark} got its name from the elevated train tracks that 'loop' around downtown Chicago."
+        elif "Michigan Avenue" in landmark:
+            fact = f"{landmark} was becoming known as the 'Magnificent Mile' for its upscale shopping and architecture."
+    
+    return {
+        "quote": quote,
+        "fact": fact,
+        "source": "Chicago Historical Society Archives",
+        "year_context": f"circa {year}"
+    }
